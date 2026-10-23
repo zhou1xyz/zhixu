@@ -51,15 +51,17 @@ import { useDialogs } from './hooks/useDialogs';
 import { AppDialogs } from './ui/AppDialogs';
 import { AppShell } from './ui/AppShell';
 import type { View, NavItem } from './ui/AppShell';
+import { CalendarView } from './ui/CalendarView';
 import { applyTheme, readStoredTheme } from './ui/theme';
 import type { ThemeMode } from './ui/theme';
 
 
 
-const APP_VERSION: string = 'v5.2';
+const APP_VERSION: string = 'v5.3';
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'board', label: '任务', hint: '任务与依赖' },
+  { id: 'calendar', label: '日历', hint: '周视图排期分布' },
   { id: 'settings', label: '时间', hint: '每周可用时间' },
 ];
 
@@ -403,6 +405,30 @@ function App() {
               >
                 重试
               </button>
+            </div>
+          ) : view === 'calendar' ? (
+            <div className="flex flex-col gap-5">
+              <header className="flex items-center justify-between gap-2">
+                <h2 className="text-lg font-semibold tracking-tight text-[var(--color-text)] md:text-2xl">
+                  周历
+                </h2>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                    aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+                    className="tap-target flex h-9 w-9 items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition hover:bg-[var(--color-card-muted)]"
+                  >
+                    <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+                  </button>
+                </div>
+              </header>
+              <CalendarView
+                tasks={tasks}
+                scheduledById={scheduledById}
+                onOpenActions={(task: Task) => setActionTask(task)}
+                todayKey={todayKey}
+              />
             </div>
           ) : view === 'board' ? (
             <div className="flex flex-col gap-5">

@@ -11,7 +11,7 @@
 import type { ReactNode } from 'react';
 import type { ThemeMode } from './theme';
 
-export type View = 'board' | 'settings';
+export type View = 'board' | 'calendar' | 'settings';
 
 export interface NavItem {
   id: View;
@@ -44,6 +44,23 @@ function NavIcon({ view }: { view: View }) {
       >
         <rect x="3" y="4" width="18" height="16" rx="2" />
         <path d="M3 10h18M9 10v10" />
+      </svg>
+    );
+  }
+  if (view === 'calendar') {
+    return (
+      <svg
+        className="h-4 w-4 shrink-0"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M3 9h18M8 4v3M16 4v3M7 13h2M11 13h2M15 13h2M7 17h2M11 17h2" />
       </svg>
     );
   }
