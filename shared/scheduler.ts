@@ -193,15 +193,22 @@ function parseHM(value: string): { hour: number; minute: number } {
 /**
  * 某天 0 点 + 几点几分 → 具体时间戳。
  *
- * 为什么要循环修正两次：时区偏移本身取决于算出来的这个时刻，
+ * 为什么直接从 naive 起步：dayStartMs 已经是「本地 0 点的时间戳」，
+ * 所以 naive（0 点 + 时分）就是正确的时刻，不需要再减时区偏移。
+ *
+ * 为什么还要循环修正：时区偏移本身取决于算出来的这个时刻，
  * 而算这个时刻又需要偏移量，属于互相依赖。迭代两次足够收敛
  * （本项目时区没有夏令时，实际第一次就准）。
+ *
+ * 教训（2026-10-23）：旧版先 subtract 一次偏移再修正，修正循环只对
+ * 钟点负责、不对日期负责，结果修到了「前一天的同一钟点」，
+ * 周末任务全部被排到当天 00:00。
  */
 function atTime(dayStartMs: number, hour: number, minute: number): number {
   const naive: number = dayStartMs + hour * 60 * MINUTE_MS + minute * MINUTE_MS;
   const expectedClockMs: number = hour * 60 * MINUTE_MS + minute * MINUTE_MS;
   // 处理夏令时切换那种偏移变化；本项目时区没有夏令时，保持简单
-  let candidate: number = naive - zoneOffsetAt(naive);
+  let candidate: number = naive;
   for (let i = 0; i < 2; i += 1) {
     const clock: LocalWallClock = wallClockAt(candidate);
     const actualClockMs: number =
