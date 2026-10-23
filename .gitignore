@@ -1,0 +1,30 @@
+# 依赖与构建产物
+node_modules
+dist
+dist-ssr
+
+# 真实业务数据：本地留存，绝不进仓库
+data/
+
+# 日志
+logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# 本地环境变量与密钥
+*.local
+.env
+.env.*
+
+# 编辑器与系统文件
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.sw?
+
+# 临时调试脚本
+dbg*.ts
+repro.ts

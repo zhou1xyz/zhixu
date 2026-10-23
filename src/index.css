@@ -1,0 +1,96 @@
+@import 'tailwindcss';
+
+/* 深色模式走 class 策略：<html data-theme="dark"> 时生效 */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* ===== 设计令牌（全局唯一定义处） ===== */
+:root {
+  --color-page: #f7f8fa;
+  --color-card: #ffffff;
+  --color-card-muted: #f8fafc;
+  --color-text: #1f2937;
+  --color-text-secondary: #4b5563;
+  --color-text-muted: #667085;
+  --color-border: #e5e7eb;
+  --color-border-strong: #cbd5e1;
+  --color-brand: #2563eb;
+  --color-brand-soft: #eff6ff;
+  --color-danger: #dc2626;
+  --color-danger-soft: #fef2f2;
+  --color-warning-soft: #fffbeb;
+  --color-warning-text: #92400e;
+  --color-success-soft: #ecfdf5;
+  --color-success-text: #065f46;
+  --radius-card: 12px;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --color-page: #0b0f14;
+  --color-card: #131a22;
+  --color-card-muted: #1a232d;
+  --color-text: #e6edf3;
+  --color-text-secondary: #a9b6c3;
+  --color-text-muted: #8b98a5;
+  --color-border: #26313c;
+  --color-border-strong: #3a4653;
+  --color-brand: #4b8ef7;
+  --color-brand-soft: #14243b;
+  --color-danger: #f97066;
+  --color-danger-soft: #2a1614;
+  --color-warning-soft: #2b2110;
+  --color-warning-text: #f2c063;
+  --color-success-soft: #11261d;
+  --color-success-text: #7adaad;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background-color: var(--color-page);
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* 触控目标最小 44px，只作用于按钮类交互元素 */
+@media (max-width: 767px) {
+  .tap-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* 长文本不撑破容器 */
+.wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
