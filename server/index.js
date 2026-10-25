@@ -320,7 +320,7 @@ function handleApi(req, res, url) {
              title=excluded.title, parentId=excluded.parentId, estimatedHours=excluded.estimatedHours,
              minHours=excluded.minHours, deadline=excluded.deadline, actualHours=excluded.actualHours,
              isCompleted=excluded.isCompleted, scheduledStartAt=excluded.scheduledStartAt, category=excluded.category, startDate=excluded.startDate, completionNote=excluded.completionNote, doneCriteria=excluded.doneCriteria, status=excluded.status, remindDate=excluded.remindDate, waitingNote=excluded.waitingNote, history=excluded.history,
-             completedAt=excluded.completedAt, firstStartedAt=excluded.firstStartedAt, waitingHours=excluded.waitingHours, workHours=excluded.workHours`,
+             waitingHours=excluded.waitingHours, workHours=excluded.workHours`,
         ).run(
           t.id, t.title, t.parentId ?? null, t.estimatedHours ?? 0, t.minHours ?? 0,
           t.deadline ?? null, t.actualHours ?? null, t.isCompleted ? 1 : 0,
@@ -328,10 +328,12 @@ function handleApi(req, res, url) {
           // createdAt 只在首次插入时生效：ON CONFLICT 分支不覆盖它，
           // 否则每次保存都会把「录入时刻」刷新成「最后编辑时刻」，起点就假了
           t.createdAt ?? new Date().toISOString(),
-          // completedAt 不接受前端传值：完成时刻必须由服务端在状态变化时盖章，
-          // 否则又会重演「用计划时间冒充完成时间」的老问题
-          t.completedAt ?? null,
-          t.firstStartedAt ?? null, t.waitingHours ?? null, t.workHours ?? null,
+          // completedAt / firstStartedAt 与 PATCH 同一口径：不接受前端传值，
+          // 由状态推导。v5.3.2 修复：旧版 POST 的 upsert 分支漏了这道闸，
+          // 直连接口可以伪造完成时刻。
+          (t.status ?? 'todo') === 'done' ? new Date().toISOString() : null,
+          (t.status ?? 'todo') === 'done' ? new Date().toISOString() : null,
+          t.waitingHours ?? null, t.workHours ?? null,
         );
         json(res, 200, { ok: true, id: t.id });
       }).catch((e) => json(res, 400, { error: String(e.message) }));
@@ -370,9 +372,14 @@ function handleApi(req, res, url) {
         if ('estimatedHours' in filtered && Number(filtered.estimatedHours) <= 0) {
           return json(res, 400, { error: 'estimatedHours 必须大于 0' });
         }
-        // 最短安排不能超过预估工期，否则排期算出来是无意义的
-        if ('minHours' in filtered && 'estimatedHours' in filtered) {
-          if (Number(filtered.minHours) > Number(filtered.estimatedHours)) {
+        // 最短安排不能超过预估工期，否则排期算出来是无意义的。
+        // 两个字段单独提交时，另一个的现值要从库里取出来一起比，
+        // 否则只改 minHours 就能绕过这道校验。
+        if ('minHours' in filtered || 'estimatedHours' in filtered) {
+          const current = db.prepare('SELECT estimatedHours, minHours FROM tasks WHERE id=?').get(id);
+          const est = 'estimatedHours' in filtered ? Number(filtered.estimatedHours) : Number(current?.estimatedHours ?? 0);
+          const min = 'minHours' in filtered ? Number(filtered.minHours) : Number(current?.minHours ?? 0);
+          if (min > est) {
             return json(res, 400, { error: 'minHours 不能大于 estimatedHours' });
           }
         }
@@ -471,6 +478,9 @@ function handleApi(req, res, url) {
       db.exec('BEGIN');
       try {
         db.prepare('DELETE FROM dependencies WHERE fromTaskId=? OR toTaskId=?').run(id, id);
+        // v5.3.2：过程记录也一并删掉。旧版漏了这步，孤儿日志永远留在
+        // 库里，而且 /api/logs/latest 还会把它们查出来返回给前端。
+        db.prepare('DELETE FROM taskLogs WHERE taskId=?').run(id);
         db.prepare('UPDATE tasks SET parentId=NULL WHERE parentId=?').run(id);
         db.prepare('DELETE FROM tasks WHERE id=?').run(id);
         db.exec('COMMIT');
