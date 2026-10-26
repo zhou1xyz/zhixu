@@ -36,7 +36,7 @@ export function ActionSheet({ title, actions, onClose }: ActionSheetProps) {
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/40"
+      className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/40 sm:items-center"
       role="presentation"
       onClick={onClose}
     >
@@ -44,7 +44,7 @@ export function ActionSheet({ title, actions, onClose }: ActionSheetProps) {
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-md rounded-t-2xl border-t border-[var(--color-border)] bg-[var(--color-card)] pb-[env(safe-area-inset-bottom)] shadow-2xl"
+        className="w-full max-w-md rounded-t-2xl border border-[var(--color-border)] border-b-0 bg-[var(--color-card)] pb-[env(safe-area-inset-bottom)] shadow-2xl sm:max-w-sm sm:rounded-2xl sm:border-b"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="border-b border-[var(--color-border)] px-5 py-4">
