@@ -57,7 +57,7 @@ import type { ThemeMode } from './ui/theme';
 
 
 
-const APP_VERSION: string = 'v5.3.3';
+const APP_VERSION: string = 'v5.3.4';
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'board', label: '任务', hint: '任务与依赖' },

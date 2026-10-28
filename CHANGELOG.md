@@ -4,6 +4,42 @@
 
 ---
 
+## v5.3.4 — 2026-10-28（P0-02：抽离任务领域服务）
+
+**架构改造：业务规则从 HTTP handler 下沉到 server/taskService.js**
+
+对应《知序架构决策记录》ADR-001 / ADR-003，经易哥批准实施。
+
+### 做了什么
+
+- 新建 `server/taskService.js`（169 行，纯 JavaScript）：
+  - `validateTaskUpdates(db, id, updates)` —— 字段白名单、status/category
+    值域、工时非负、minHours≤estimatedHours（含单独提交取库内现值）
+  - `applyStatusTransition(db, id, filtered, nowMs)` —— history 流转记录、
+    waitingHours 离开等待结算、workHours 完成结算（返工累加不清零）、
+    firstStartedAt / completedAt 服务端盖章、isCompleted 派生
+- `server/index.js` PATCH handler 只剩协议解析与错误映射（590→530 行）
+- 错误映射：领域层返回 `{ok:false, error}`，HTTP 层统一 400；
+  数据库异常由 handler 兜底 500（既有行为）
+- 事务边界：单条 UPDATE 原子；读-写竞态为既有行为，记录为已知限制（P0-03）
+
+### 验证
+
+- **六组状态流转快照 + 四个边界场景，迁移前后逐字段对照零差异**
+  （含 HTTP 状态码、响应体、status/isCompleted/工时/等待/历史序列）
+- 新增 `tests/taskService.test.ts` 10 条（正常流转、返工累计、非法状态、
+  任务不存在、受保护字段伪造、history 脏数据、数据库异常）
+- 全量测试 32/32 通过；tsc 零错误；构建成功；页面 200
+- 真实业务数据零变化（纯代码搬动）
+
+### 已知限制（记录，不在本轮修）
+
+1. POST upsert 到 todo 时若旧行残留 completedAt 会出现不一致
+   （快照准备过程中发现）→ P0-03 写入一致性处理
+2. PATCH 读状态与写更新之间无事务/乐观锁 → P0-03 处理
+
+---
+
 ## v5.3.3 — 2026-10-26（修订号：修复桌面端动作菜单不居中）
 
 **修复：任务操作菜单在桌面端贴底显示**
