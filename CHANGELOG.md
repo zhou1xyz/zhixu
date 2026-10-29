@@ -4,6 +4,30 @@
 
 ---
 
+## v5.3.8 — 2026-10-29（P1-03a：服务模块惰性化）
+
+**架构改造：import server/index.js 不再产生任何启动副作用**
+
+对应 ADR-001，P1-03 设计方案子阶段 a，经易哥批准实施。
+
+### 改动
+
+- 建目录 / 开库 / WAL / 建表 / 迁移全部收进 `initDb(dbPath)`，
+  ensureColumn 与启动迁移收进 `runMigrations(database)`
+- 新增 `startServer({port, dbPath})`：初始化 + 监听；`isMain` 才调用
+- 导出不变：createApp（兼容）、新增 startServer
+- 行为不变：正常启动路径与原有一致（页面/接口/快照对照验证）
+
+### 验证
+
+- `import('./server/index.js')` 无副作用：不建目录、不开库、不迁移、
+  不监听（导出 createApp + startServer）✅
+- 重启后页面 200、43 条任务可读、仅 127.0.0.1 监听 ✅
+- 六组快照 + 边界场景与基线零差异 ✅
+- 41/41 测试；tsc 零错误；构建成功 ✅
+- 回滚：git revert 单提交
+
+---
 ## v5.3.7 — 2026-10-29（P1-02：业务写入可信性修复）
 
 **经批准：工时/历史/完成标记收归服务端权威计算**

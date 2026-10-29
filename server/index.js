@@ -17,7 +17,8 @@
  *   - 新增列用 ensureColumn，老库启动时自动补列
  */
 import { createServer } from 'node:http';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,78 +32,21 @@ const DIST = join(ROOT, 'dist');
 const DATA_DIR = join(ROOT, 'data');
 const DB_PATH = process.env.TASK_DB_PATH || join(DATA_DIR, 'app.db');
 
-await mkdir(DATA_DIR, { recursive: true });
+// P1-03a 惰性化：import 本模块不再有副作用（不建目录/不开库/不迁移/不监听）
+let db;
 
-const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL;');
+/** 初始化数据库：建目录、开连接、WAL、迁移。由 startServer 调用。 */
+function initDb(dbPath = DB_PATH) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const database = new DatabaseSync(dbPath);
+  database.exec('PRAGMA journal_mode = WAL;');
+  runMigrations(database);
+  db = database;
+  return database;
+}
 
 // 表结构与前端 types 一一对应。taskFiles 为将来附件功能预留，当前不写入。
-db.exec(`
-CREATE TABLE IF NOT EXISTS tasks (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  parentId TEXT,
-  estimatedHours REAL NOT NULL DEFAULT 0,
-  minHours REAL NOT NULL DEFAULT 0,
-  deadline TEXT,
-  actualHours REAL,
-  isCompleted INTEGER NOT NULL DEFAULT 0,
-  scheduledStartAt TEXT,
-  startDate TEXT,
-  completionNote TEXT,
-  doneCriteria TEXT,
-  status TEXT NOT NULL DEFAULT 'todo',
-  remindDate TEXT,
-  waitingNote TEXT,
-  history TEXT,
-  category TEXT NOT NULL DEFAULT 'any',
-  createdAt TEXT,
-  completedAt TEXT,
-  firstStartedAt TEXT,
-  waitingHours REAL,
-  workHours REAL
-);
-CREATE TABLE IF NOT EXISTS dependencies (
-  id TEXT PRIMARY KEY,
-  fromTaskId TEXT NOT NULL,
-  toTaskId TEXT NOT NULL,
-  type TEXT NOT NULL DEFAULT 'fs',
-  lagDays REAL NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS availabilityTemplates (
-  id TEXT PRIMARY KEY,
-  weekday INTEGER NOT NULL,
-  startTime TEXT NOT NULL,
-  endTime TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT 'any'
-);
-CREATE TABLE IF NOT EXISTS scheduleEntries (
-  id TEXT PRIMARY KEY,
-  taskId TEXT NOT NULL,
-  startAt TEXT NOT NULL,
-  endAt TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS taskTemplates (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS taskLogs (
-  id TEXT PRIMARY KEY,
-  taskId TEXT NOT NULL,
-  createdAt TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'note',
-  content TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS taskFiles (
-  id TEXT PRIMARY KEY,
-  taskId TEXT NOT NULL,
-  fileName TEXT NOT NULL,
-  mimeType TEXT,
-  size INTEGER NOT NULL DEFAULT 0,
-  storagePath TEXT,
-  createdAt TEXT
-);
-`);
+
 
 /** 轻量迁移：已有库补齐新增列，避免 CREATE TABLE IF NOT EXISTS 不生效 */
 /**
@@ -112,39 +56,110 @@ CREATE TABLE IF NOT EXISTS taskFiles (
  * 所以新加的字段没法靠建表语句生效。启动时检查一遍，
  * 缺什么补什么，老数据不受影响。
  */
-function ensureColumn(table, column, type) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
-  if (!cols.includes(column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+
+function runMigrations(database) {
+  const db = database;
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    parentId TEXT,
+    estimatedHours REAL NOT NULL DEFAULT 0,
+    minHours REAL NOT NULL DEFAULT 0,
+    deadline TEXT,
+    actualHours REAL,
+    isCompleted INTEGER NOT NULL DEFAULT 0,
+    scheduledStartAt TEXT,
+    startDate TEXT,
+    completionNote TEXT,
+    doneCriteria TEXT,
+    status TEXT NOT NULL DEFAULT 'todo',
+    remindDate TEXT,
+    waitingNote TEXT,
+    history TEXT,
+    category TEXT NOT NULL DEFAULT 'any',
+    createdAt TEXT,
+    completedAt TEXT,
+    firstStartedAt TEXT,
+    waitingHours REAL,
+    workHours REAL
+  );
+  CREATE TABLE IF NOT EXISTS dependencies (
+    id TEXT PRIMARY KEY,
+    fromTaskId TEXT NOT NULL,
+    toTaskId TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'fs',
+    lagDays REAL NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS availabilityTemplates (
+    id TEXT PRIMARY KEY,
+    weekday INTEGER NOT NULL,
+    startTime TEXT NOT NULL,
+    endTime TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'any'
+  );
+  CREATE TABLE IF NOT EXISTS scheduleEntries (
+    id TEXT PRIMARY KEY,
+    taskId TEXT NOT NULL,
+    startAt TEXT NOT NULL,
+    endAt TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS taskTemplates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS taskLogs (
+    id TEXT PRIMARY KEY,
+    taskId TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'note',
+    content TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS taskFiles (
+    id TEXT PRIMARY KEY,
+    taskId TEXT NOT NULL,
+    fileName TEXT NOT NULL,
+    mimeType TEXT,
+    size INTEGER NOT NULL DEFAULT 0,
+    storagePath TEXT,
+    createdAt TEXT
+  );
+  `);
+  function ensureColumn(table, column, type) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+  }
+
+  ensureColumn('tasks', 'startDate', 'TEXT');
+  ensureColumn('tasks', 'completionNote', 'TEXT');
+  ensureColumn('tasks', 'doneCriteria', 'TEXT');
+  ensureColumn('tasks', 'status', "TEXT NOT NULL DEFAULT 'todo'");
+  ensureColumn('tasks', 'remindDate', 'TEXT');
+  ensureColumn('tasks', 'waitingNote', 'TEXT');
+  ensureColumn('tasks', 'history', 'TEXT');
+  // v5.0：实际工时的自动计量。createdAt 是任务生命的起点，
+  // 没有它就算不出「实际跨度」，所以老任务这一列只能留空。
+  ensureColumn('tasks', 'createdAt', 'TEXT');
+  // v5.2：完成时刻。以前没这个字段，「完成时间」位置被塞进了排期计划开始时间，
+  // 导致已完成任务占用了还没到来的未来时段。这个字段只由服务端在状态转向 done 时写入。
+  ensureColumn('tasks', 'completedAt', 'TEXT');
+  ensureColumn('tasks', 'firstStartedAt', 'TEXT');
+  ensureColumn('tasks', 'waitingHours', 'REAL');
+  ensureColumn('tasks', 'workHours', 'REAL');
+  // 一次性迁移：把旧的 isCompleted=1 映射为 status='done'
+  // P1-02：旧库一次性迁移不再无记录盲转 done——补盖完成时刻并留系统痕迹
+  {
+    const legacy = db.prepare("SELECT id FROM tasks WHERE isCompleted = 1 AND (status IS NULL OR status = 'todo')").all();
+    for (const row of legacy) {
+      const now = new Date().toISOString();
+      db.prepare("UPDATE tasks SET status='done', completedAt=COALESCE(completedAt, ?), history=COALESCE(history, ?) WHERE id=?")
+        .run(now, JSON.stringify([{ at: now, from: 'todo', to: 'done', note: '系统迁移：旧数据补记' }]), row.id);
+    }
   }
 }
 
-ensureColumn('tasks', 'startDate', 'TEXT');
-ensureColumn('tasks', 'completionNote', 'TEXT');
-ensureColumn('tasks', 'doneCriteria', 'TEXT');
-ensureColumn('tasks', 'status', "TEXT NOT NULL DEFAULT 'todo'");
-ensureColumn('tasks', 'remindDate', 'TEXT');
-ensureColumn('tasks', 'waitingNote', 'TEXT');
-ensureColumn('tasks', 'history', 'TEXT');
-// v5.0：实际工时的自动计量。createdAt 是任务生命的起点，
-// 没有它就算不出「实际跨度」，所以老任务这一列只能留空。
-ensureColumn('tasks', 'createdAt', 'TEXT');
-// v5.2：完成时刻。以前没这个字段，「完成时间」位置被塞进了排期计划开始时间，
-// 导致已完成任务占用了还没到来的未来时段。这个字段只由服务端在状态转向 done 时写入。
-ensureColumn('tasks', 'completedAt', 'TEXT');
-ensureColumn('tasks', 'firstStartedAt', 'TEXT');
-ensureColumn('tasks', 'waitingHours', 'REAL');
-ensureColumn('tasks', 'workHours', 'REAL');
-// 一次性迁移：把旧的 isCompleted=1 映射为 status='done'
-// P1-02：旧库一次性迁移不再无记录盲转 done——补盖完成时刻并留系统痕迹
-{
-  const legacy = db.prepare("SELECT id FROM tasks WHERE isCompleted = 1 AND (status IS NULL OR status = 'todo')").all();
-  for (const row of legacy) {
-    const now = new Date().toISOString();
-    db.prepare("UPDATE tasks SET status='done', completedAt=COALESCE(completedAt, ?), history=COALESCE(history, ?) WHERE id=?")
-      .run(now, JSON.stringify([{ at: now, from: 'todo', to: 'done', note: '系统迁移：旧数据补记' }]), row.id);
-  }
-}
 
 const logRow = (row) => ({
   id: row.id,
@@ -537,10 +552,16 @@ export function createApp() {
 }
 
 /** 直接运行时才监听端口；被测试 import 时不会启动 */
+/** 启动服务（含数据库初始化）；测试/外部可传端口与库路径 */
+export function startServer({ port = PORT, dbPath = DB_PATH } = {}) {
+  db = initDb(dbPath);
+  return createApp().listen(port, '127.0.0.1', () => {
+    console.log(`task-scheduler server listening on http://127.0.0.1:${port}`);
+    console.log(`database: ${dbPath}`);
+  });
+}
+
 const isMain = process.argv[1] && process.argv[1].endsWith('server/index.js');
 if (isMain) {
-  createApp().listen(PORT, '127.0.0.1', () => {
-    console.log(`task-scheduler server listening on http://127.0.0.1:${PORT}`);
-    console.log(`database: ${DB_PATH}`);
-  });
+  startServer();
 }
