@@ -525,7 +525,7 @@ export function createApp() {
 /** 直接运行时才监听端口；被测试 import 时不会启动 */
 const isMain = process.argv[1] && process.argv[1].endsWith('server/index.js');
 if (isMain) {
-  createApp().listen(PORT, '0.0.0.0', () => {
+  createApp().listen(PORT, '127.0.0.1', () => {
     console.log(`task-scheduler server listening on http://127.0.0.1:${PORT}`);
     console.log(`database: ${DB_PATH}`);
   });
