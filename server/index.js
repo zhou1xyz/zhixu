@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { schedule } from '../shared/scheduler.ts';
 import { updateTask, sanitizeNewTask } from './taskService.js';
+import { createAgentTables } from './agentSchema.js';
 
 const PORT = Number(process.env.PORT || 5190);
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
@@ -157,7 +158,7 @@ function runMigrations(database) {
       db.prepare("UPDATE tasks SET status='done', completedAt=COALESCE(completedAt, ?), history=COALESCE(history, ?) WHERE id=?")
         .run(now, JSON.stringify([{ at: now, from: 'todo', to: 'done', note: '系统迁移：旧数据补记' }]), row.id);
     }
-  }
+  }  createAgentTables(database);
 }
 
 

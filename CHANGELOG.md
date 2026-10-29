@@ -4,6 +4,43 @@
 
 ---
 
+## v5.3.9 — 2026-10-29（P1-03b：Agent 会话与执行记录表）
+
+**新增五张 agent_ 表（DDL v4 + 批准修正），业务表零改动**
+
+对应《P1-03b 最终设计（定稿版）》+ 批准修正，经易哥批准实施。
+
+### 新建对象（server/agentSchema.js，幂等 IF NOT EXISTS）
+
+| 对象 | 说明 |
+|---|---|
+| agent_sessions | 会话 |
+| agent_messages | 消息（run_id ON DELETE SET NULL；删 run 先解除关联保留消息） |
+| agent_runs | 运行（默认 running；status 含 proposed/needs_reconciliation；UNIQUE(session_id, request_id) 请求幂等） |
+| agent_tool_calls | 工具调用（UNIQUE(run_id, lcid)；六态状态机含 executing/outcome_unknown；verified_at） |
+| agent_confirmations | 确认凭证（UNIQUE 一次性消费；expires_at 绝对时刻） |
+
+- 3 个普通索引 + 2 个 UNIQUE 索引；error_kind 闭集枚举（9 值）
+- 外键仅文档性声明（PRAGMA foreign_keys 未开启）；run 删除时应用层
+  先解除 messages 关联（启用外键后 ON DELETE SET NULL 与其等价）
+- 结构自检：sqlite_master DDL 归一化（含剥离 IF NOT EXISTS）比对 +
+  索引清单比对，同名表结构异常 → 启动失败明确报错
+- 建表 + 索引 + 自检在单事务内，失败整体回滚
+
+### 验证
+
+- 临时库四场景：空库建表 ✅ / 重复迁移幂等（sqlite_master 零变化）✅ /
+  回滚完整性（视图占名触发自检失败，已建表全部回滚）✅ /
+  缺列同名表报结构不一致 ✅
+- 生产库迁移：五表 + 2 个 UNIQUE 索引就位；tasks 43→43；
+  迁移前 agent_ 表 0；业务对象 14 个不变；页面 200
+- 六组快照 + 边界零差异；41/41 测试；tsc 零错误；构建成功
+
+### 回滚
+
+代码 revert；Agent 表已有数据时只回滚代码不删表。
+
+---
 ## v5.3.8 — 2026-10-29（P1-03a：服务模块惰性化）
 
 **架构改造：import server/index.js 不再产生任何启动副作用**
