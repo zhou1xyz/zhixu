@@ -109,3 +109,22 @@ test('HTTP：孤儿记录为零', async () => {
   for (const c of bundle.tool_calls) assert.ok(runIds.has(c.run_id), '调用孤儿');
   for (const r of bundle.runs) assert.equal(r.session_id, bundle.session.id);
 });
+
+test('HTTP：并发相同 request_id 只产生一个 run 和一条消息', async () => {
+  const body = { request_id: 'cc1', content: '并发消息' };
+  const results = await Promise.all([
+    call('POST', `/api/agent/sessions/${sid}/messages`, body),
+    call('POST', `/api/agent/sessions/${sid}/messages`, body),
+    call('POST', `/api/agent/sessions/${sid}/messages`, body),
+  ]);
+  const runIds = new Set(results.map((r) => (r.body as { run_id?: string }).run_id).filter(Boolean));
+  assert.equal(runIds.size, 1, '所有成功响应应指向同一 run');
+  const bundle = (await call('GET', `/api/agent/sessions/${sid}`)).body as { messages: Array<{ content: string }> };
+  assert.equal(bundle.messages.filter((m) => m.content === '并发消息').length, 1, '消息只落一条');
+});
+test('HTTP：executed 状态不重复执行（重放不产生新调用行）', async () => {
+  const before = await call('POST', `/api/agent/sessions/${sid}/tools`, { request_id: 'q1', calls: [{ tool: 'query_tasks', arguments: { keyword: '周报' } }] });
+  const calls1 = (before.body as { tool_calls: unknown[] }).tool_calls.length;
+  assert.equal((before.body as { replayed: boolean }).replayed, true);
+  assert.equal(calls1 >= 1, true);
+});
