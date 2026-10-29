@@ -1,7 +1,8 @@
 /**
  * agentSchema —— P1-03b：Agent 会话与执行记录五张表（DDL v4 定稿）
  *
- * 外键声明均为文档性（PRAGMA foreign_keys 未启用，运行时由应用层维护，
+ * 外键声明与连接级行为说明（实测 node:sqlite DatabaseSync 默认启用外键强制，
+ * PRAGMA foreign_keys=1；删除/更新顺序由应用层维护，
  * 维护规则见 docs P1-03b 设计报告 §1/§3）。删除策略：
  *   - 删 run：应用层先将 agent_messages.run_id 置 NULL（保留消息），再删 run
  *   - 删会话：单事务按 confirmations → tool_calls → runs → messages → sessions 顺序

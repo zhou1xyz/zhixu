@@ -4,31 +4,50 @@
 
 ---
 
-## v5.4.0 — 2026-10-29（P1-03c：最小 Agent Runtime 与只读工具）
+## v5.5.2 — 2026-10-29（P1-03d-B1 阶段归档：runAgentTurn 单轮闭环）
 
-**新增能力：无模型的最小 Runtime + 首个只读工具（经批准）**
+**B1 技术实现正式验收通过后的阶段归档版本。**
 
-### 新增
+### 完成（经验收）
 
-- `server/agent/tools.js`：工具注册表（服务端唯一定义名/参数/风险级，
-  调用方无法覆盖 risk）+ 参数确定性规范化与哈希 + 首个 R0 工具
-  `query_tasks`（状态/类别/关键字/limit 过滤，1-100 条）
-- `server/agent/runtime.js`：会话/消息/运行/工具调用生命周期；
-  同事务查重-建消息-建 run（并发唯一约束冲突回查既有 run）；
-  请求重放（同 request_id 同输入）返回同一 run 不重复处理，
-  不同输入 409；工具调用持久化 pending→executing→终态；
-  消息接口不伪造 agent 回复（model='none'，仅记录用户消息）
-- `/api/agent/*` 路由：sessions/messages/tools 受控端点（无模型也可自动化测试）
-- 测试 +11（单元 + HTTP 集成：注册表/伪造/risk 覆盖/重放/409/孤儿/幂等）
+- `runAgentTurn` 单轮执行闭环：幂等创建/重放裁决（输入指纹 409、
+  状态感知重放）→ 模型调用（rounds=-1 认领防并发重入）→ 用量持久化
+  → 助手消息 → 终态守卫转换
+- `transitRun` 状态守卫：终态无出边；来源不符 0 行拒绝，不伪造成功
+- 工具请求拒绝：不执行任何工具，助手消息明确说明，run failed/unknown
+- 用量语义区分：上游未提供 → usage_json=NULL（正常未知，无警告）；
+  提供但写入失败 → 同事务 system 故障说明 + payload.usage_warning（不伪造数字）
+- 请求幂等：同 request_id 顺序重放返回同一 run；不同输入 409；并发仅单执行者
 
-### 验证
+### B1 边界
 
-52/52 测试；tsc 零错误；构建成功；页面 200；业务数据 43 条不变；
-既有 API 与快照路径零变化。
+不执行工具；无确认流；无多轮工具循环；无真实模型接入。
 
-### 回滚
+### 测试
 
-git revert 单提交；agent_ 表保留（无破坏性）。
+- agentTurn 11 条 + 全量 **69/69** 通过；tsc 零错误；生产构建成功
+- 故障注入：用量写入失败、事务回滚、终态 0 行、并发挂起均按语义处理
+- 生产库未被动：tasks 43、agent_runs/tool_calls/messages 0、40d65b71 原样
+
+### 说明
+
+- 三个 B1 提交（055bbaa/d7c0784/8f0198e）消息标题误写为 v5.4.1——
+  该标签未出现在任何文件中，实际应用版本自阶段 A 起为 v5.5.1，
+  本次归档为 v5.5.2（详见 docs/agent-runtime-B1.md）
+
+---
+## v5.5.1 — 2026-10-29（P1-03d 收尾：密钥缺失错误分类修正）
+
+**修正：密钥缺失 → `not_configured`（与凭据无效 `auth_invalid` 分离）**
+
+- `modelAdapter`：`AGENT_MODEL_KEY` 未配置时返回 `not_configured`
+  （不触网），401/403 仍归 `auth_invalid`
+- 兼容性说明：`not_configured` 当前不在 `agent_runs.error_kind` 的
+  CHECK 闭集内；阶段 A 不落库故无冲突，阶段 B 落库前必须先扩展
+  CHECK（另行批准）或映射为已允许值——已在适配器内注释标明
+- 测试：缺失密钥（not_configured/不触网）、401 归 auth_invalid 均断言；
+  全量 **59/59**；tsc 零错误；构建成功
+- 核验：`5f74cfe` 未含备份文件（data/ 已 gitignore）；无 schema 变更
 
 ---
 ## v5.5.0 — 2026-10-29（P1-03d-A：模型适配层 + 审计列）
@@ -60,20 +79,6 @@ git revert 单提交；新增列为可空列，保留无害。
 
 ---
 
-## v5.5.1 — 2026-10-29（P1-03d 收尾：密钥缺失错误分类修正）
-
-**修正：密钥缺失 → `not_configured`（与凭据无效 `auth_invalid` 分离）**
-
-- `modelAdapter`：`AGENT_MODEL_KEY` 未配置时返回 `not_configured`
-  （不触网），401/403 仍归 `auth_invalid`
-- 兼容性说明：`not_configured` 当前不在 `agent_runs.error_kind` 的
-  CHECK 闭集内；阶段 A 不落库故无冲突，阶段 B 落库前必须先扩展
-  CHECK（另行批准）或映射为已允许值——已在适配器内注释标明
-- 测试：缺失密钥（not_configured/不触网）、401 归 auth_invalid 均断言；
-  全量 **59/59**；tsc 零错误；构建成功
-- 核验：`5f74cfe` 未含备份文件（data/ 已 gitignore）；无 schema 变更
-
----
 ## 勘误（2026-10-29，针对 v5.3.9 条目）
 
 v5.3.9 条目中「外键仅文档性声明（PRAGMA foreign_keys 未开启）」**记载有误**。
@@ -84,6 +89,32 @@ v5.3.9 条目中「外键仅文档性声明（PRAGMA foreign_keys 未开启）�
 推断不成立——DDL 中的 REFERENCES 与 ON DELETE 行为是实际生效的。
 
 ---
+
+## v5.4.0 — 2026-10-29（P1-03c：最小 Agent Runtime 与只读工具）
+
+**新增能力：无模型的最小 Runtime + 首个只读工具（经批准）**
+
+### 新增
+
+- `server/agent/tools.js`：工具注册表（服务端唯一定义名/参数/风险级，
+  调用方无法覆盖 risk）+ 参数确定性规范化与哈希 + 首个 R0 工具
+  `query_tasks`（状态/类别/关键字/limit 过滤，1-100 条）
+- `server/agent/runtime.js`：会话/消息/运行/工具调用生命周期；
+  同事务查重-建消息-建 run（并发唯一约束冲突回查既有 run）；
+  请求重放（同 request_id 同输入）返回同一 run 不重复处理，
+  不同输入 409；工具调用持久化 pending→executing→终态；
+  消息接口不伪造 agent 回复（model='none'，仅记录用户消息）
+- `/api/agent/*` 路由：sessions/messages/tools 受控端点（无模型也可自动化测试）
+- 测试 +11（单元 + HTTP 集成：注册表/伪造/risk 覆盖/重放/409/孤儿/幂等）
+
+### 验证
+
+52/52 测试；tsc 零错误；构建成功；页面 200；业务数据 43 条不变；
+既有 API 与快照路径零变化。
+
+### 回滚
+
+git revert 单提交；agent_ 表保留（无破坏性）。
 
 ## v5.3.9 — 2026-10-29（P1-03b：Agent 会话与执行记录表）
 
