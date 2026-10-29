@@ -15,13 +15,13 @@
  */
 
 /** 允许前端更新的任务字段白名单：挡住拼错或恶意字段名直接进 SQL */
+// P1-02：移出 isCompleted / history / waitingHours / workHours——
+// 工时与历史只由服务端结算（权威计算），isCompleted 纯派生，
+// 客户端传值一律忽略（静默剥离，不报错，渐进收敛）。
 const TASK_UPDATABLE_FIELDS = new Set([
   'title', 'parentId', 'estimatedHours', 'minHours', 'deadline', 'actualHours',
-  'isCompleted', 'scheduledStartAt', 'category', 'startDate', 'completionNote',
-  'doneCriteria', 'status', 'remindDate', 'waitingNote', 'history',
-  // v5.0：完成时前端会带上算好的净工时，允许落库；
-  // createdAt / completedAt / firstStartedAt 是系统自己写的锚点，不接受外部传值
-  'waitingHours', 'workHours',
+  'scheduledStartAt', 'category', 'startDate', 'completionNote',
+  'doneCriteria', 'status', 'remindDate', 'waitingNote',
 ]);
 
 const VALID_STATUS = new Set(['todo', 'waiting', 'done']);
@@ -190,4 +190,31 @@ export function updateTask(db, id, updates, nowMs = Date.now()) {
     db.exec('ROLLBACK');
     throw e;
   }
+}
+
+/**
+ * 新建/覆盖任务的入参净化（P1-02，POST 严格版）。
+ * - 禁止直接创建/覆盖为 done：返回错误（不静默降级）。
+ * - 服务端权威字段（workHours/waitingHours/history/completedAt/firstStartedAt）
+ *   一律剥离，不参与落库。
+ * 返回 { ok:true, clean } 或 { ok:false, error }。
+ */
+export function sanitizeNewTask(t) {
+  const status = t.status ?? 'todo';
+  if (status === 'done') {
+    return { ok: false, error: '不允许通过创建接口直接设为 done；请先创建任务，再走完成流程' };
+  }
+  if (status !== 'todo' && status !== 'waiting') {
+    return { ok: false, error: 'status 只能是 todo / waiting / done' };
+  }
+  const clean = { ...t };
+  delete clean.status;
+  delete clean.workHours;
+  delete clean.waitingHours;
+  delete clean.history;
+  delete clean.completedAt;
+  delete clean.firstStartedAt;
+  delete clean.isCompleted;
+  clean.status = status;
+  return { ok: true, clean, status };
 }

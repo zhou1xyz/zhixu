@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { applyStatusTransition, validateTaskUpdates } from '../server/taskService.js';
+import { applyStatusTransition, validateTaskUpdates, sanitizeNewTask } from '../server/taskService.js';
 
 function freshDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
@@ -34,7 +34,7 @@ test('校验：全非法字段返回错误', () => {
 });
 test('校验：非法 status / category / 负数工时均拒绝', () => {
   const db = freshDb();
-  for (const bad of [{ status: 'bogus' }, { category: 'xxx' }, { estimatedHours: -5 }, { workHours: 'abc' }]) {
+  for (const bad of [{ status: 'bogus' }, { category: 'xxx' }, { estimatedHours: -5 }, { minHours: -1 }]) {
     assert.equal(validateTaskUpdates(db, 't1', bad).ok, false, JSON.stringify(bad));
   }
 });
@@ -96,4 +96,36 @@ test('健壮性：history 脏数据不崩，按无历史处理', () => {
 test('数据库异常：向不存在的表查询时抛出而非吞错', () => {
   const bad = new DatabaseSync(':memory:');
   assert.throws(() => validateTaskUpdates(bad, 't1', { minHours: 1 }));
+});
+
+test('P1-02：仅含受保护字段的 PATCH 被整体拒绝（无合法可更新字段）', () => {
+  const r = validateTaskUpdates(freshDb(), 't1', { workHours: 99, waitingHours: 99, history: 'x', isCompleted: true });
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /没有可更新的合法字段/);
+});
+test('P1-02：受保护字段混在合法字段中时被剥离', () => {
+  const r = validateTaskUpdates(freshDb(), 't1', { status: 'waiting', workHours: 99, history: 'x' });
+  assert.equal(r.ok, true);
+  const f = r.filtered as Record<string, unknown>;
+  assert.deepEqual(Object.keys(f).sort(), ['status']);
+});
+test('P1-02：sanitizeNewTask 拒绝直插 done', () => {
+  const r = sanitizeNewTask({ id: 'x', title: 'x', estimatedHours: 1, status: 'done' });
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /不允许通过创建接口/);
+});
+test('P1-02：sanitizeNewTask 剥离权威字段', () => {
+  const r = sanitizeNewTask({ id: 'x', title: 'x', estimatedHours: 1, status: 'todo', workHours: 9, history: 'h', completedAt: 'c', isCompleted: true });
+  assert.equal(r.ok, true);
+  const c = r.clean as Record<string, unknown>;
+  assert.equal(c.workHours, undefined);
+  assert.equal(c.history, undefined);
+  assert.equal(c.completedAt, undefined);
+  assert.equal(c.isCompleted, undefined);
+  assert.equal(c.status, 'todo');
+});
+test('P1-02：客户端 waitingHours 不再进白名单', () => {
+  const v = validateTaskUpdates(freshDb(), 't1', { status: 'waiting', waitingHours: 999 });
+  assert.equal(v.ok, true);
+  assert.equal('waitingHours' in (v.filtered as object), false);
 });

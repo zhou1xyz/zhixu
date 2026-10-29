@@ -23,13 +23,13 @@ import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { schedule } from '../shared/scheduler.ts';
-import { updateTask } from './taskService.js';
+import { updateTask, sanitizeNewTask } from './taskService.js';
 
 const PORT = Number(process.env.PORT || 5190);
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const DIST = join(ROOT, 'dist');
 const DATA_DIR = join(ROOT, 'data');
-const DB_PATH = join(DATA_DIR, 'app.db');
+const DB_PATH = process.env.TASK_DB_PATH || join(DATA_DIR, 'app.db');
 
 await mkdir(DATA_DIR, { recursive: true });
 
@@ -136,7 +136,15 @@ ensureColumn('tasks', 'firstStartedAt', 'TEXT');
 ensureColumn('tasks', 'waitingHours', 'REAL');
 ensureColumn('tasks', 'workHours', 'REAL');
 // 一次性迁移：把旧的 isCompleted=1 映射为 status='done'
-db.exec("UPDATE tasks SET status = 'done' WHERE isCompleted = 1 AND (status IS NULL OR status = 'todo')");
+// P1-02：旧库一次性迁移不再无记录盲转 done——补盖完成时刻并留系统痕迹
+{
+  const legacy = db.prepare("SELECT id FROM tasks WHERE isCompleted = 1 AND (status IS NULL OR status = 'todo')").all();
+  for (const row of legacy) {
+    const now = new Date().toISOString();
+    db.prepare("UPDATE tasks SET status='done', completedAt=COALESCE(completedAt, ?), history=COALESCE(history, ?) WHERE id=?")
+      .run(now, JSON.stringify([{ at: now, from: 'todo', to: 'done', note: '系统迁移：旧数据补记' }]), row.id);
+  }
+}
 
 const logRow = (row) => ({
   id: row.id,
@@ -305,7 +313,13 @@ function handleApi(req, res, url) {
       return;
     }
     if (req.method === 'POST') {
-      return readBody(req).then((t) => {
+      return readBody(req).then((raw) => {
+        // P1-02 严格版：禁止 upsert 直插 done；权威字段剥离
+        const check = sanitizeNewTask(raw);
+        if (!check.ok) {
+          return json(res, 400, { error: check.error });
+        }
+        const t = check.clean;
         db.exec('BEGIN');
         try {
         db.prepare(
@@ -327,9 +341,9 @@ completedAt=excluded.completedAt, firstStartedAt=excluded.firstStartedAt,
           // completedAt / firstStartedAt 与 PATCH 同一口径：不接受前端传值，
           // 由状态推导。v5.3.2 修复：旧版 POST 的 upsert 分支漏了这道闸，
           // 直连接口可以伪造完成时刻。
-          (t.status ?? 'todo') === 'done' ? new Date().toISOString() : null,
-          (t.status ?? 'todo') === 'done' ? new Date().toISOString() : null,
-          t.waitingHours ?? null, t.workHours ?? null,
+          null,
+          null,
+          null, null,
         );
         db.exec('COMMIT');
         } catch (e) {
