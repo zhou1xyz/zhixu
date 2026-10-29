@@ -4,6 +4,39 @@
 
 ---
 
+## v5.3.5 — 2026-10-29（P0-03：写入一致性）
+
+**架构改造：POST upsert 补盖章字段、PATCH 包事务、删除清理排期预留表**
+
+对应《知序架构决策记录》ADR-001/002，经易哥批准实施。
+
+### 三处一致性修复（均先复现后修复）
+
+1. **POST upsert 残留 completedAt**：冲突更新分支更新 17 个字段但漏了
+   completedAt / firstStartedAt，同 ID upsert 到 status=todo 时旧行的
+   完成时刻残留（已复现：status=todo 却带 done 时间戳）。现冲突分支
+   一并更新这两个字段——其 excluded 值本就是服务端按 status 推导的
+   盖章值，非客户端可伪造。
+2. **POST upsert 包事务**：BEGIN/COMMIT/ROLLBACK，与 DELETE 路径一致，
+   失败整条回滚（500）。
+3. **PATCH 读-写竞态消除**：taskService 新增复合入口
+   `updateTask(db, id, updates, nowMs)`，校验→状态流转→UPDATE 包在
+   BEGIN IMMEDIATE 事务里，失败回滚上抛；HTTP 层只做协议处理。
+
+### 顺带（同属清理语义）
+
+DELETE 任务时一并清理 scheduleEntries 引用（该表当前恒为空，0 行已
+核实；防 P3 启用计划版本后残留脏引用）。
+
+### 验证
+
+- 残留缺陷：修复前复现（completedAt 非 null）→ 修复后 null ✅
+- PATCH 六组快照 + 四边界场景重跑，与 P0-02 基线逐字段对照零差异 ✅
+- 全量测试 32/32；tsc 零错误；构建成功；页面 200 ✅
+- 真实业务数据零变化 ✅
+
+---
+
 ## v5.3.4 — 2026-10-28（P0-02：抽离任务领域服务）
 
 **架构改造：业务规则从 HTTP handler 下沉到 server/taskService.js**

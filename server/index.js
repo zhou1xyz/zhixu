@@ -23,7 +23,7 @@ import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { schedule } from '../shared/scheduler.ts';
-import { validateTaskUpdates, applyStatusTransition } from './taskService.js';
+import { updateTask } from './taskService.js';
 
 const PORT = Number(process.env.PORT || 5190);
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
@@ -306,6 +306,8 @@ function handleApi(req, res, url) {
     }
     if (req.method === 'POST') {
       return readBody(req).then((t) => {
+        db.exec('BEGIN');
+        try {
         db.prepare(
           `INSERT INTO tasks (id, title, parentId, estimatedHours, minHours, deadline, actualHours, isCompleted, scheduledStartAt, category, startDate, completionNote, doneCriteria, status, remindDate, waitingNote, history, createdAt, completedAt, firstStartedAt, waitingHours, workHours)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -313,6 +315,7 @@ function handleApi(req, res, url) {
              title=excluded.title, parentId=excluded.parentId, estimatedHours=excluded.estimatedHours,
              minHours=excluded.minHours, deadline=excluded.deadline, actualHours=excluded.actualHours,
              isCompleted=excluded.isCompleted, scheduledStartAt=excluded.scheduledStartAt, category=excluded.category, startDate=excluded.startDate, completionNote=excluded.completionNote, doneCriteria=excluded.doneCriteria, status=excluded.status, remindDate=excluded.remindDate, waitingNote=excluded.waitingNote, history=excluded.history,
+completedAt=excluded.completedAt, firstStartedAt=excluded.firstStartedAt,
              waitingHours=excluded.waitingHours, workHours=excluded.workHours`,
         ).run(
           t.id, t.title, t.parentId ?? null, t.estimatedHours ?? 0, t.minHours ?? 0,
@@ -328,25 +331,22 @@ function handleApi(req, res, url) {
           (t.status ?? 'todo') === 'done' ? new Date().toISOString() : null,
           t.waitingHours ?? null, t.workHours ?? null,
         );
+        db.exec('COMMIT');
+        } catch (e) {
+          db.exec('ROLLBACK');
+          return json(res, 500, { error: String(e.message) });
+        }
         json(res, 200, { ok: true, id: t.id });
       }).catch((e) => json(res, 400, { error: String(e.message) }));
     }
     if (req.method === 'PATCH' && id) {
       return readBody(req).then((updates) => {
-        // P0-02：业务规则（白名单、值域校验、状态流转、工时结算、盖章字段）
-        // 全部下沉到 taskService；这里只做协议解析与错误映射。
-        const checked = validateTaskUpdates(db, id, updates);
-        if (!checked.ok) {
-          return json(res, 400, { error: checked.error });
+        // P0-02/P0-03：业务规则与事务边界都在 taskService；这里只做协议处理。
+        const result = updateTask(db, id, updates, Date.now());
+        if (!result.ok) {
+          return json(res, 400, { error: result.error });
         }
-        if (checked.empty) {
-          return json(res, 200, { ok: true, changed: 0 });
-        }
-        const mapped = applyStatusTransition(db, id, checked.filtered, Date.now());
-        const cols = Object.keys(mapped);
-        const sql = `UPDATE tasks SET ${cols.map((c) => `${c}=?`).join(', ')} WHERE id=?`;
-        const result = db.prepare(sql).run(...cols.map((c) => mapped[c] ?? null), id);
-        json(res, 200, { ok: true, changed: result.changes });
+        json(res, 200, { ok: true, changed: result.changed });
       }).catch((e) => json(res, 400, { error: String(e.message) }));
     }
     if (req.method === 'DELETE' && id) {
@@ -357,6 +357,8 @@ function handleApi(req, res, url) {
         // v5.3.2：过程记录也一并删掉。旧版漏了这步，孤儿日志永远留在
         // 库里，而且 /api/logs/latest 还会把它们查出来返回给前端。
         db.prepare('DELETE FROM taskLogs WHERE taskId=?').run(id);
+        // P0-03：预留的排期条目表一并清理（当前恒为空，防 P3 启用后残留）
+        db.prepare('DELETE FROM scheduleEntries WHERE taskId=?').run(id);
         db.prepare('UPDATE tasks SET parentId=NULL WHERE parentId=?').run(id);
         db.prepare('DELETE FROM tasks WHERE id=?').run(id);
         db.exec('COMMIT');

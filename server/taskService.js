@@ -167,3 +167,27 @@ export function applyStatusTransition(db, id, filtered, nowMs) {
   if ('isCompleted' in mapped) mapped.isCompleted = mapped.isCompleted ? 1 : 0;
   return mapped;
 }
+
+/**
+ * 复合写入口（P0-03）：校验 → 状态流转 → UPDATE，全程包在
+ * BEGIN IMMEDIATE 事务里。读状态与写更新之间的竞态由此消除：
+ * 事务期间其他写入者被挡在库外（单进程场景下等价于全量互斥）。
+ * 返回 { ok:true, changed } 或 { ok:false, error }；异常时回滚并上抛。
+ */
+export function updateTask(db, id, updates, nowMs = Date.now()) {
+  const checked = validateTaskUpdates(db, id, updates);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  if (checked.empty) return { ok: true, changed: 0 };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const mapped = applyStatusTransition(db, id, checked.filtered, nowMs);
+    const cols = Object.keys(mapped);
+    const sql = `UPDATE tasks SET ${cols.map((c) => `${c}=?`).join(', ')} WHERE id=?`;
+    const result = db.prepare(sql).run(...cols.map((c) => mapped[c] ?? null), id);
+    db.exec('COMMIT');
+    return { ok: true, changed: result.changes };
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
