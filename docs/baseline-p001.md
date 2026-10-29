@@ -113,3 +113,25 @@ logs（含 latest）、purge-orphan-children、purge-orphan-deps、export、sche
 - 6 个 curl 场景快照迁移前后一致。
 - `npx tsc -b`、`npm run build`、页面 200。
 - 真实数据零变化（迁移是纯代码搬动，不碰库）。
+
+---
+
+# P0 阶段验收记录（2026-10-29）
+
+| 阶段 | 内容 | 提交 | 验收 |
+|---|---|---|---|
+| P0-01 | 基线核验 + 备份 | 5869c7a / d97bcb7 | ✅ 报告见上 |
+| P0-02 | 领域服务抽离（taskService.js） | 8dc1a70 | ✅ 易哥验收；六组快照零差异；32/32 测试 |
+| P0-03 | 写入一致性（upsert 补章/事务/PATCH BEGIN IMMEDIATE） | 041f303 | ✅ 残留缺陷修复复验通过 |
+| P0-04 | 监听收窄 127.0.0.1（方案 C） | a8d01e6 | ✅ 代码侧全过；**手机端 tailnet 实测：易哥 2026-10-29 确认正常** |
+
+**P0 阶段整体验收：通过。**
+
+版本轨迹：v5.3.4（P0-02）→ v5.3.5（P0-03）→ v5.3.6（P0-04）。
+
+## 遗留与 P1 前置项（进入 P1 前无需处理，但必须记得）
+
+1. workHours/waitingHours 由前端计算落库——Agent 写入前必须改为服务端结算（ADR-006）
+2. POST upsert 到 todo 已补章，但 upsert 语义对 status 流转历史是覆盖式的——Agent 批量写任务前需评估
+3. 时区口径分裂（todayKey 浏览器本地 vs 周历上海）——多端接入前统一
+4. 时钟依赖：工时结算用 Date.now()，不可回拨系统时钟
