@@ -281,6 +281,8 @@ export async function runAgentTurn(db, sessionId, body, adapter) {
   // B1 方案：认领即 transitRun('running'→'running') 无效。
   // 落地方案：以 created_at==finished_at IS NULL 且本进程内存标记不跨进程——
   // 采用条件更新争抢标记：无专用列时，用 rounds IS NULL 作为「未执行」标记。
+  // ⚠ 哨兵值：rounds=-1 表示「执行中认领」，非法计数；B2 引入独立认领字段
+  // （如 claimed_at）时迁移该哨兵，迁移前任何统计必须排除 -1。
   const claimed = db.prepare("UPDATE agent_runs SET rounds = -1 WHERE id=? AND rounds IS NULL AND status='running'").run(run.id).changes;
   if (claimed === 0 && run.rounds !== null && run.rounds !== undefined) {
     // 已有执行者认领过（rounds=-1 或已计数）→ in_progress
@@ -293,65 +295,96 @@ export async function runAgentTurn(db, sessionId, body, adapter) {
   const callCount = 1;
   void callCount;
 
-  // 阶段 4：用量持久化（尽早；失败不伪造，保留 running）
-  try {
-    if (chatResult.ok) {
-      const u = chatResult.usage;
-      const valid = u && Number(u.total_tokens) > 0;
-      db.prepare("UPDATE agent_runs SET usage_json=?, rounds=1 WHERE id=? AND status='running'")
-        .run(valid ? JSON.stringify(u) : null, run.id);
-    }
-  } catch (e) {
-    // 用量写入失败：不伪造已持久化；保留 running 状态由核验机制处理
-    console.error('[agent] 用量持久化失败：', String(e?.message ?? e).slice(0, 200));
-  }
-
-  // 阶段 5：结果处理
+  // 阶段 4：适配器失败 → failed（0 行与 SQL 异常分别处理，均不伪造终态）
   if (!chatResult.ok) {
     const kind = mapErrorKind(chatResult.error_kind);
     const detail = (chatResult.error_kind === 'not_configured' ? 'not_configured: ' : '')
       + String(chatResult.error ?? '').slice(0, 500);
-    const changes = transitRun(db, run.id, 'running', 'failed', { error_kind: kind, error_detail: detail });
+    let changes;
+    try {
+      changes = transitRun(db, run.id, 'running', 'failed', { error_kind: kind, error_detail: detail });
+    } catch (e) {
+      console.error('[agent] 终态更新异常（保留 running）：', String(e?.message ?? e).slice(0, 200));
+      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新异常，结果未持久化' } };
+    }
     if (changes === 0) {
-      // 终态更新失败：不伪造，保留 running（可确认状态）
-      console.error('[agent] run 终态更新失败（保留 running）：', run.id);
-      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败，结果未持久化' } };
+      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败（0 行），结果未持久化' } };
     }
     return { status: 200, payload: { run_id: run.id, status: 'failed', error_kind: kind, error_detail: detail } };
   }
 
-  // 模型请求工具：B1 不执行 → 助手消息明确说明 + run failed/unknown
+  // 阶段 5：模型请求工具 → 说明消息 + failed（单事务；不执行任何工具）
   if (chatResult.toolCalls && chatResult.toolCalls.length > 0) {
     const names = chatResult.toolCalls.map((tc) => tc.name).join(', ');
     const notice = `模型请求调用工具，本轮未执行：${names}（当前版本不支持工具执行，已记录待人工处理）`;
+    const detail = `tool_calls 未执行: [${names}]（B1 不支持工具执行）`;
+    db.exec('BEGIN IMMEDIATE');
     try {
       db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'agent',?,?,?)")
         .run(randomUUID(), sessionId, notice, run.id, now());
+      const changes = transitRun(db, run.id, 'running', 'failed', { error_kind: 'unknown', error_detail: detail });
+      // 0 行 = 状态守卫拒绝，不得提交（提交即谎报已转换 failed）
+      if (changes === 0) {
+        db.exec('ROLLBACK');
+        return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败（0 行），结果未持久化' } };
+      }
+      db.exec('COMMIT');
     } catch (e) {
-      // 说明消息落库失败：保留 running，不伪造已告知
-      console.error('[agent] 工具拒绝说明消息落库失败：', String(e?.message ?? e).slice(0, 200));
-      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '工具拒绝说明落库失败' } };
+      try { db.exec('ROLLBACK'); } catch {}
+      console.error('[agent] 工具拒绝持久化失败（保留 running）：', String(e?.message ?? e).slice(0, 200));
+      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '工具拒绝结果持久化失败' } };
     }
-    const detail = `tool_calls 未执行: [${names}]（B1 不支持工具执行）`;
-    transitRun(db, run.id, 'running', 'failed', { error_kind: 'unknown', error_detail: detail });
     return { status: 200, payload: { run_id: run.id, status: 'failed', error_kind: 'unknown', error_detail: detail } };
   }
 
-  // 成功：助手消息落库（独立容错：失败则 run 保留 running，不伪造成功）
-  let assistantMsgId;
+  // 阶段 6：成功持久化（单事务：助手消息 + 用量 + 故障说明 + 终态）
+  // 用量语义（P1-03d 收尾批准）：
+  //   - 上游无有效用量 → usage_json=NULL，正常未知，无警告
+  //   - 有效用量写入失败 → 同事务追加 system 故障说明 + payload.usage_warning，
+  //     绝不伪造数字、不与普通 NULL 混淆
+  let usageWarning;
+  let msgId;
+  db.exec('BEGIN IMMEDIATE');
   try {
-    assistantMsgId = randomUUID();
+    msgId = randomUUID();
     db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'agent',?,?,?)")
-      .run(assistantMsgId, sessionId, chatResult.content, run.id, now());
+      .run(msgId, sessionId, chatResult.content, run.id, now());
+    const u = chatResult.usage;
+    const validUsage = u && (Number(u.total_tokens) > 0 || Number(u.prompt_tokens) > 0 || Number(u.completion_tokens) > 0);
+    if (validUsage) {
+      try {
+        db.prepare("UPDATE agent_runs SET usage_json=?, rounds=1 WHERE id=? AND status='running'")
+          .run(JSON.stringify(u), run.id);
+      } catch (usageErr) {
+        // 用量持久化故障：同事务留痕（system 消息），payload 显式告知
+        db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'system',?,?,?)")
+          .run(randomUUID(), sessionId, '用量持久化失败：本轮 token 用量未能记录（写入异常）。', run.id, now());
+        usageWarning = '用量持久化失败，本轮用量未能记录';
+      }
+    }
+    const changes = transitRun(db, run.id, 'running', 'succeeded');
+    if (changes === 0) {
+      db.exec('ROLLBACK');
+      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败（0 行），结果未持久化' } };
+    }
+    db.exec('COMMIT');
   } catch (e) {
-    console.error('[agent] 助手消息落库失败（保留 running）：', String(e?.message ?? e).slice(0, 200));
-    return { status: 200, payload: { run_id: run.id, status: 'running', warning: '助手消息落库失败，结果未持久化' } };
+    try { db.exec('ROLLBACK'); } catch {}
+    // 事务失败：数据库保留真实可确认的未决状态（run=running，无助手消息），
+    // 不得假设故障标记已写入
+    console.error('[agent] 结果持久化事务失败（保留 running）：', String(e?.message ?? e).slice(0, 200));
+    return { status: 200, payload: { run_id: run.id, status: 'running', warning: '结果持久化失败，本轮回复未保存' } };
   }
 
-  const changes = transitRun(db, run.id, 'running', 'succeeded');
-  if (changes === 0) {
-    console.error('[agent] run 终态更新失败（保留 running）：', run.id);
-    return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败，结果未持久化' } };
-  }
-  return { status: 200, payload: { run_id: run.id, status: 'succeeded', message: db.prepare('SELECT * FROM agent_messages WHERE id=?').get(assistantMsgId), usage_json: run.usage_json ?? null, rounds: run.rounds } };
+  // 从数据库重读最终结果（不使用创建 run 时的陈旧快照）
+  const finalRow = db.prepare('SELECT status, usage_json, rounds FROM agent_runs WHERE id=?').get(run.id);
+  const payload = {
+    run_id: run.id,
+    status: finalRow.status,
+    message: db.prepare('SELECT * FROM agent_messages WHERE id=?').get(msgId),
+    usage_json: finalRow.usage_json,
+    rounds: finalRow.rounds,
+  };
+  if (usageWarning) payload.usage_warning = usageWarning;
+  return { status: 200, payload };
 }
