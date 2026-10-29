@@ -26,6 +26,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { schedule } from '../shared/scheduler.ts';
 import { updateTask, sanitizeNewTask } from './taskService.js';
 import { createAgentTables } from './agentSchema.js';
+import { agentApi } from './agent/runtime.js';
 
 const PORT = Number(process.env.PORT || 5190);
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
@@ -293,8 +294,16 @@ async function serveStatic(req, res, pathname) {
  * 字段安全：更新任务时只认白名单里的字段，
  * 前端传什么奇怪的字段名都不会进到 SQL 里。
  */
-function handleApi(req, res, url) {
+async function handleApi(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // ['api', 'tasks', ...]
+
+  // Agent Runtime 路由（P1-03c）：协议处理仍在本层，业务与记录在 runtime
+  if (url.pathname.startsWith('/api/agent/')) {
+    const body = req.method === 'POST' ? await readBody(req).catch(() => ({})) : null;
+    const result = agentApi(db, req.method, url.pathname, body);
+    json(res, result.status, result.payload);
+    return;
+  }
 
   // GET /api/all —— 一次性取全部数据，前端启动时用
   if (req.method === 'GET' && url.pathname === '/api/all') {
