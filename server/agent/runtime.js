@@ -169,3 +169,189 @@ export function agentApi(db, method, pathname, body) {
     return { status: 500, payload: { error: String(e?.message ?? e).slice(0, 500) } };
   }
 }
+
+// ============================================================
+// P1-03d B1：runAgentTurn —— 单轮对话闭环（模型调用 + 持久化）
+// ============================================================
+
+/** 终态集合（进入即不可再转换） */
+const TERMINAL_RUN_STATES = new Set(['succeeded', 'failed', 'cancelled', 'needs_reconciliation']);
+
+/**
+ * 状态转换守卫：仅允许声明的 from→to。
+ * 终态转换附带 finished_at；返回 changes（0 = 守卫拒绝，调用方不得伪造成功）。
+ */
+export function transitRun(db, id, from, to, fields = {}) {
+  // 终态无出边：succeeded/failed/cancelled/needs_reconciliation 一律拒绝复活
+  if (TERMINAL_RUN_STATES.has(from)) return 0;
+  const isTerminal = TERMINAL_RUN_STATES.has(to);
+  const extraKeys = Object.keys(fields);
+  const sets = ['status = ?'];
+  const vals = [to];
+  if (isTerminal) { sets.push('finished_at = ?'); vals.push(now()); }
+  for (const k of extraKeys) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+  const setSql = ['status = ?']
+    .concat(isTerminal ? ['finished_at = ?'] : [])
+    .concat(extraKeys.map((k) => `${k} = ?`))
+    .join(', ');
+  const finalVals = [to, ...(isTerminal ? [now()] : []), ...Object.values(fields), id, from];
+  const result = db.prepare(`UPDATE agent_runs SET ${setSql} WHERE id = ? AND status = ?`).run(...finalVals);
+  return result.changes;
+}
+
+/** 适配器错误分类 → 落库 error_kind 的映射（持久化边界，唯一出口） */
+function mapErrorKind(kind) {
+  switch (kind) {
+    case 'timeout':
+    case 'bad_response':
+    case 'model_error':
+    case 'auth_invalid':
+      return kind;
+    case 'not_configured':
+      // 语义归入 model_error；原始分类保留在 error_detail 前缀
+      return 'model_error';
+    case 'db_error':
+      // 保守映射：错误详情前缀标明真实原因（error_kind 闭集含 db_error，
+      // 但按 B1 批准约束不直接落库该值）
+      return 'unknown';
+    default:
+      return 'unknown';
+  }
+}
+
+/**
+ * 单轮对话闭环：幂等创建 → 模型调用 → 用量持久化 → 助手消息 → 终态。
+ * 明确边界（B1）：不执行工具；单轮；模型调用在事务外（无跨系统原子性）。
+ */
+export async function runAgentTurn(db, sessionId, body, adapter) {
+  if (!db.prepare('SELECT id FROM agent_sessions WHERE id=?').get(sessionId)) return { status: 404, payload: { error: '会话不存在' } };
+  const requestId = typeof body?.request_id === 'string' ? body.request_id : '';
+  const content = typeof body?.content === 'string' ? body.content : '';
+  if (!requestId || requestId.length > 128) return { status: 400, payload: { error: 'request_id 必填且 ≤128 字符' } };
+  if (!content || Buffer.byteLength(content, 'utf8') > MAX_CONTENT_BYTES) return { status: 400, payload: { error: 'content 必填且 ≤16384 UTF-8 字节' } };
+  if (!adapter || typeof adapter.chat !== 'function') return { status: 400, payload: { error: '缺少模型适配器' } };
+
+  const inputHash = sha('message:' + content);
+
+  // 阶段 1：幂等创建/重放裁决（事务内）
+  db.exec('BEGIN IMMEDIATE');
+  let run;
+  try {
+    run = db.prepare('SELECT * FROM agent_runs WHERE session_id=? AND request_id=?').get(sessionId, requestId);
+    if (run) { db.exec('ROLLBACK'); }
+    else {
+      const runId = randomUUID();
+      const msgId = randomUUID();
+      const t = now();
+      // message_id 先为 NULL（FK 指向 agent_messages），落消息后回填（P1-03c 同款模式）
+      db.prepare("INSERT INTO agent_runs (id, session_id, message_id, request_id, status, model, created_at) VALUES (?,?,NULL,?,'running',?,?)")
+        .run(runId, sessionId, requestId, adapter.model ?? 'none', t);
+      db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'user',?,?,?)")
+        .run(msgId, sessionId, content, runId, t);
+      db.prepare('UPDATE agent_runs SET message_id=? WHERE id=?').run(msgId, runId);
+      db.exec('COMMIT');
+      run = db.prepare('SELECT * FROM agent_runs WHERE id=?').get(runId);
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch {}
+    throw e;
+  }
+
+  // 阶段 2：重放裁决（按 run 状态；先校验输入指纹，不同输入占用同 request_id → 409）
+  const userMsg = run.message_id ? db.prepare('SELECT content FROM agent_messages WHERE id=?').get(run.message_id) : null;
+  const storedHash = userMsg ? sha('message:' + userMsg.content) : null;
+  if (storedHash !== inputHash) {
+    return { status: 409, payload: { error: 'request_id 已被不同输入使用', run_id: run.id } };
+  }
+  const assistant = () => db.prepare("SELECT * FROM agent_messages WHERE run_id=? AND role='agent'").get(run.id) ?? null;
+  if (run.status === 'succeeded') {
+    return { status: 200, payload: { run_id: run.id, replayed: true, status: 'succeeded', message: assistant(), usage_json: run.usage_json, rounds: run.rounds } };
+  }
+  if (run.status === 'failed') {
+    return { status: 200, payload: { run_id: run.id, replayed: true, status: 'failed', error_kind: run.error_kind, error_detail: run.error_detail, usage_json: run.usage_json, rounds: run.rounds } };
+  }
+  if (run.status !== 'running') {
+    // awaiting/proposed/cancelled/needs_reconciliation：不重调、不伪造
+    return { status: 200, payload: { run_id: run.id, replayed: true, status: run.status, in_progress: false } };
+  }
+  // run.status === 'running'：可能正在执行（并发重入）→ in_progress
+  // 但若本请求就是创建者（首次），继续执行。区分：创建分支后 run 一定 running。
+  // 并发重入者也会看到 running —— 用数据库守卫保证模型调用只发生一次：
+  // 先原子认领（占位列不可用）→ 采用「助手消息唯一性」间接判定不可靠；
+  // B1 方案：认领即 transitRun('running'→'running') 无效。
+  // 落地方案：以 created_at==finished_at IS NULL 且本进程内存标记不跨进程——
+  // 采用条件更新争抢标记：无专用列时，用 rounds IS NULL 作为「未执行」标记。
+  const claimed = db.prepare("UPDATE agent_runs SET rounds = -1 WHERE id=? AND rounds IS NULL AND status='running'").run(run.id).changes;
+  if (claimed === 0 && run.rounds !== null && run.rounds !== undefined) {
+    // 已有执行者认领过（rounds=-1 或已计数）→ in_progress
+    return { status: 200, payload: { run_id: run.id, in_progress: true } };
+  }
+  void claimed;
+
+  // 阶段 3：模型调用（事务外，至多一个执行者）
+  const chatResult = await adapter.chat({ messages: [{ role: 'user', content }] });
+  const callCount = 1;
+  void callCount;
+
+  // 阶段 4：用量持久化（尽早；失败不伪造，保留 running）
+  try {
+    if (chatResult.ok) {
+      const u = chatResult.usage;
+      const valid = u && Number(u.total_tokens) > 0;
+      db.prepare("UPDATE agent_runs SET usage_json=?, rounds=1 WHERE id=? AND status='running'")
+        .run(valid ? JSON.stringify(u) : null, run.id);
+    }
+  } catch (e) {
+    // 用量写入失败：不伪造已持久化；保留 running 状态由核验机制处理
+    console.error('[agent] 用量持久化失败：', String(e?.message ?? e).slice(0, 200));
+  }
+
+  // 阶段 5：结果处理
+  if (!chatResult.ok) {
+    const kind = mapErrorKind(chatResult.error_kind);
+    const detail = (chatResult.error_kind === 'not_configured' ? 'not_configured: ' : '')
+      + String(chatResult.error ?? '').slice(0, 500);
+    const changes = transitRun(db, run.id, 'running', 'failed', { error_kind: kind, error_detail: detail });
+    if (changes === 0) {
+      // 终态更新失败：不伪造，保留 running（可确认状态）
+      console.error('[agent] run 终态更新失败（保留 running）：', run.id);
+      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败，结果未持久化' } };
+    }
+    return { status: 200, payload: { run_id: run.id, status: 'failed', error_kind: kind, error_detail: detail } };
+  }
+
+  // 模型请求工具：B1 不执行 → 助手消息明确说明 + run failed/unknown
+  if (chatResult.toolCalls && chatResult.toolCalls.length > 0) {
+    const names = chatResult.toolCalls.map((tc) => tc.name).join(', ');
+    const notice = `模型请求调用工具，本轮未执行：${names}（当前版本不支持工具执行，已记录待人工处理）`;
+    try {
+      db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'agent',?,?,?)")
+        .run(randomUUID(), sessionId, notice, run.id, now());
+    } catch (e) {
+      // 说明消息落库失败：保留 running，不伪造已告知
+      console.error('[agent] 工具拒绝说明消息落库失败：', String(e?.message ?? e).slice(0, 200));
+      return { status: 200, payload: { run_id: run.id, status: 'running', warning: '工具拒绝说明落库失败' } };
+    }
+    const detail = `tool_calls 未执行: [${names}]（B1 不支持工具执行）`;
+    transitRun(db, run.id, 'running', 'failed', { error_kind: 'unknown', error_detail: detail });
+    return { status: 200, payload: { run_id: run.id, status: 'failed', error_kind: 'unknown', error_detail: detail } };
+  }
+
+  // 成功：助手消息落库（独立容错：失败则 run 保留 running，不伪造成功）
+  let assistantMsgId;
+  try {
+    assistantMsgId = randomUUID();
+    db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'agent',?,?,?)")
+      .run(assistantMsgId, sessionId, chatResult.content, run.id, now());
+  } catch (e) {
+    console.error('[agent] 助手消息落库失败（保留 running）：', String(e?.message ?? e).slice(0, 200));
+    return { status: 200, payload: { run_id: run.id, status: 'running', warning: '助手消息落库失败，结果未持久化' } };
+  }
+
+  const changes = transitRun(db, run.id, 'running', 'succeeded');
+  if (changes === 0) {
+    console.error('[agent] run 终态更新失败（保留 running）：', run.id);
+    return { status: 200, payload: { run_id: run.id, status: 'running', warning: '终态更新失败，结果未持久化' } };
+  }
+  return { status: 200, payload: { run_id: run.id, status: 'succeeded', message: db.prepare('SELECT * FROM agent_messages WHERE id=?').get(assistantMsgId), usage_json: run.usage_json ?? null, rounds: run.rounds } };
+}
