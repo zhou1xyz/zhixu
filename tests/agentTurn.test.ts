@@ -92,7 +92,7 @@ test('2/3 有效用量写入失败：usage_warning + system 故障说明 + 回�
 
 test('4 后续事务失败：不声称已持久化，run 停留 running', async () => {
   const db = setup();
-  const { adapter } = scripted([{ value: ok('回复', { total_tokens: 15 }) }]);
+  const { adapter, calls } = scripted([{ value: ok('回复', { total_tokens: 15 }) }]);
   // 注入：用量写入与 system 故障说明均失败 → 整个事务回滚
   const restore = inject(db, ['usage_json=?, rounds=1', "VALUES (?,?,'system'"], 'throw');
   const r = await runAgentTurn(db, 's1', { request_id: 'r4', content: '问题' }, adapter);
@@ -102,8 +102,12 @@ test('4 后续事务失败：不声称已持久化，run 停留 running', async 
   assert.match(String(p.warning), /未保存|持久化失败/);
   const row = getRow(db, 'r4');
   assert.equal(row.status, 'running');
+  assert.equal(row.rounds, -1, '未决 running 保留执行中哨兵');
   assert.equal(row.usage_json, null, '回滚后无伪造用量');
   assert.equal(msgCount(db), 1, '仅用户消息留存');
+  const replay = await runAgentTurn(db, 's1', { request_id: 'r4', content: '问题' }, adapter);
+  assert.equal((replay.payload as { in_progress: boolean }).in_progress, true, '未决重放不重调模型');
+  assert.equal(calls.length, 1, '模型调用计数不变');
 });
 
 test('5 成功响应读取最新数据库结果（非陈旧快照）', async () => {
@@ -126,6 +130,7 @@ test('6 工具拒绝路径：transitRun 0 行时不谎报转换成功', async ()
   assert.match(String(p.warning), /0 行/);
   const row = getRow(db, 'r6');
   assert.equal(row.status, 'running');
+  assert.equal(row.rounds, -1, '0 行未决保留哨兵');
 });
 
 test('7 重放不重复插入助手/故障说明消息', async () => {

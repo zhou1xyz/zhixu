@@ -322,7 +322,7 @@ export async function runAgentTurn(db, sessionId, body, adapter) {
     try {
       db.prepare("INSERT INTO agent_messages (id, session_id, role, content, run_id, created_at) VALUES (?,?,'agent',?,?,?)")
         .run(randomUUID(), sessionId, notice, run.id, now());
-      const changes = transitRun(db, run.id, 'running', 'failed', { error_kind: 'unknown', error_detail: detail });
+      const changes = transitRun(db, run.id, 'running', 'failed', { rounds: 1, error_kind: 'unknown', error_detail: detail });
       // 0 行 = 状态守卫拒绝，不得提交（提交即谎报已转换 failed）
       if (changes === 0) {
         db.exec('ROLLBACK');
