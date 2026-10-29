@@ -97,6 +97,7 @@ export function createAgentTables(database) {
   database.exec('BEGIN');
   try {
     for (const t of TABLES) database.exec(t.sql);
+    ensureAgentColumns(database);
     for (const i of INDEXES) database.exec(i.sql);
     verifyAgentSchema(database);
     database.exec('COMMIT');
@@ -106,13 +107,51 @@ export function createAgentTables(database) {
   }
 }
 
-/** 结构自检：表/索引的 sqlite_master 文本与预期 DDL 归一化比对 */
+/**
+ * 老库增列（P1-03d-A）：agent_runs 补 usage_json / rounds。
+ * 仅增列，不改既有字段、不回填；幂等。
+ */
+export function ensureAgentColumns(database) {
+  const need = { agent_runs: [['usage_json', 'TEXT'], ['rounds', 'INTEGER']] };
+  for (const [table, cols] of Object.entries(need)) {
+    const existing = new Set(
+      database.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name),
+    );
+    for (const [col, type] of cols) {
+      if (!existing.has(col)) {
+        database.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+      }
+    }
+  }
+}
+
+
+/** 从 CREATE TABLE 模板提取列名集合（括号深度感知，跳过表级约束） */
+function requiredColumns(createSql) {
+  const body = createSql.slice(createSql.indexOf('(') + 1, createSql.lastIndexOf(')'));
+  const segs = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of body) {
+    if (ch === '(') depth += 1;
+    if (ch === ')') depth -= 1;
+    if (ch === ',' && depth === 0) { segs.push(cur); cur = ''; } else { cur += ch; }
+  }
+  segs.push(cur);
+  return segs
+    .map((x) => x.trim().replace(/,$/, '').trim())
+    .filter((x) => x && !/^(CHECK|UNIQUE|PRIMARY|FOREIGN)\b/i.test(x))
+    .map((x) => x.split(/\s+/)[0]);
+}
+
+/** 结构自检：表存在 + 必需列齐（列集比对，兼容 ALTER 增列）+ 索引比对 */
 export function verifyAgentSchema(database) {
   for (const t of TABLES) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(t.name);
     if (!row) throw new Error(`Agent 表缺失：${t.name}`);
-    if (normalizeSql(row.sql) !== normalizeSql(t.sql)) {
-      throw new Error(`Agent 表结构不一致：${t.name}（同名旧表可能来自其他版本，请人工核查）`);
+    const cols = new Set(database.prepare(`PRAGMA table_info(${t.name})`).all().map((c) => c.name));
+    for (const c of requiredColumns(t.sql)) {
+      if (!cols.has(c)) throw new Error(`Agent 表缺列：${t.name}.${c}`);
     }
   }
   for (const i of INDEXES) {

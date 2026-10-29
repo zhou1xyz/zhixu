@@ -31,6 +31,35 @@
 git revert 单提交；agent_ 表保留（无破坏性）。
 
 ---
+## v5.5.0 — 2026-10-29（P1-03d-A：模型适配层 + 审计列）
+
+**新增能力：模型适配接口 + agent_runs 审计列（经批准，阶段 A）**
+
+### 新增
+
+- `server/agent/modelAdapter.js`：统一 chat 接口 + DashScope OpenAI
+  兼容实现（原生 fetch 零依赖）；密钥仅读环境变量
+  `AGENT_MODEL_KEY`（未配置 → isConfigured=false，不触网）；
+  错误归一化 auth_invalid/timeout/model_error/bad_response；
+  可注入 fetch/配置便于测试（全程不触网）
+- `agent_runs` 增列 `usage_json TEXT`、`rounds INTEGER`
+  （ensureAgentColumns 老库增列，幂等；结构自检升级为列集比对，
+  兼容 ALTER 增列）
+- 未实现 runAgentTurn/确认流/路由（阶段 B/C，未授权）
+
+### 验证
+
+- 适配器测试 4/4（正常解析、缺密钥、401/500/坏 JSON、超时中断）
+- Schema 兼容：老结构库升级增列、旧数据保留、列集自检、重复迁移幂等
+- 全量测试 **58/58**；tsc 零错误；构建成功；页面 200
+- 生产库 agent_runs 已增列，tasks 43 不变，runs 0 行零回填
+
+### 回滚
+
+git revert 单提交；新增列为可空列，保留无害。
+
+---
+
 ## 勘误（2026-10-29，针对 v5.3.9 条目）
 
 v5.3.9 条目中「外键仅文档性声明（PRAGMA foreign_keys 未开启）」**记载有误**。

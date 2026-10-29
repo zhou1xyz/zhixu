@@ -37,7 +37,7 @@ test('executeTool：非法参数拒绝', () => {
 });
 
 // ---- HTTP 集成（独立进程 + 临时库） ----
-const PORT = 5199;
+const PORT = 5198;
 const BASE = 'http://127.0.0.1:' + PORT;
 let child: ReturnType<typeof spawn> | undefined;
 const dbPath = join(mkdtempSync(join(tmpdir(), 'p103c-')), 'test.db');
