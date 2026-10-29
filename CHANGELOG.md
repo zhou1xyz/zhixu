@@ -60,6 +60,20 @@ git revert 单提交；新增列为可空列，保留无害。
 
 ---
 
+## v5.5.1 — 2026-10-29（P1-03d 收尾：密钥缺失错误分类修正）
+
+**修正：密钥缺失 → `not_configured`（与凭据无效 `auth_invalid` 分离）**
+
+- `modelAdapter`：`AGENT_MODEL_KEY` 未配置时返回 `not_configured`
+  （不触网），401/403 仍归 `auth_invalid`
+- 兼容性说明：`not_configured` 当前不在 `agent_runs.error_kind` 的
+  CHECK 闭集内；阶段 A 不落库故无冲突，阶段 B 落库前必须先扩展
+  CHECK（另行批准）或映射为已允许值——已在适配器内注释标明
+- 测试：缺失密钥（not_configured/不触网）、401 归 auth_invalid 均断言；
+  全量 **59/59**；tsc 零错误；构建成功
+- 核验：`5f74cfe` 未含备份文件（data/ 已 gitignore）；无 schema 变更
+
+---
 ## 勘误（2026-10-29，针对 v5.3.9 条目）
 
 v5.3.9 条目中「外键仅文档性声明（PRAGMA foreign_keys 未开启）」**记载有误**。

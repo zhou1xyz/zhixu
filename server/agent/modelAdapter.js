@@ -7,7 +7,8 @@
  * 可注入 fetchImpl / 配置，便于测试（不触网）。
  *
  * 错误归一化（error_kind 闭集，与 agent 表 CHECK 一致）：
- *   auth_invalid  密钥未配置/上游 401/403
+ *   not_configured 密钥未配置（与凭据无效区分；尚不落库）
+ *   auth_invalid  上游 401/403
  *   timeout       超时或中断
  *   model_error   上游其他 HTTP 错误
  *   bad_response  响应不可解析/结构不符
@@ -51,7 +52,10 @@ export function createModelAdapter(options = {}) {
      */
     async chat({ messages, tools }) {
       if (!apiKey) {
-        return { ok: false, error_kind: 'auth_invalid', error: '模型密钥未配置' };
+        // P1-03d 收尾修正：密钥缺失与凭据无效分离。
+        // 注意：'not_configured' 目前不在 agent_runs.error_kind 的 CHECK
+        // 闭集内；阶段 B 落库前必须先扩展 CHECK 或映射为已允许值。
+        return { ok: false, error_kind: 'not_configured', error: '模型密钥未配置' };
       }
       const body = {
         model,
