@@ -26,10 +26,10 @@ test('正常响应：content/toolCalls/usage 解析', async () => {
     assert.deepEqual(r.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   }
 });
-test('缺少密钥：auth_invalid，不触网', async () => {
-  const adapter = createModelAdapter({ apiKey: undefined, fetchImpl: async () => { throw new Error('不应触网'); } });
+test('缺少密钥：not_configured，不触网', async () => {
+  const adapter = createModelAdapter({ apiKey: undefined, fetchImpl: async () => { throw new Error('不应触网'); } } as never);
   const r = await adapter.chat({ messages: [] });
-  assert.deepEqual({ ok: r.ok, error_kind: (r as { error_kind?: string }).error_kind }, { ok: false, error_kind: 'auth_invalid' });
+  assert.deepEqual({ ok: (r as { ok: boolean }).ok, error_kind: (r as { error_kind?: string }).error_kind }, { ok: false, error_kind: 'not_configured' });
 });
 test('上游 401/500/坏 JSON 错误归一化', async () => {
   const a = createModelAdapter({ apiKey: 'k', fetchImpl: async () => ({ ok: false, status: 401, text: async () => '' }) as never });
